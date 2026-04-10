@@ -11,7 +11,7 @@ import numpy as np
 import lichtfeld as lf
 from lfs_plugins.types import Panel
 
-from ..core.linear_path import LinearPath, LineSegment, OrbitSegment, compute_linear_camera_position
+from ..core.linear_path import LinearPath, LineSegment, OrbitSegment, HelixSegment, compute_linear_camera_position
 from ..core.recorder import RecordingSettings, get_default_output_path, record_linear_video, record_linear_frames_to_folder
 from ..operators.point_picker import set_point_callback, clear_point_callback, was_point_cancelled
 from ..operators.path_preview import start_preview, stop_preview, is_preview_active, get_preview_progress
@@ -77,6 +77,7 @@ def _linear_path_draw_handler(ctx):
     end_color = (1.0, 0.4, 0.2, 1.0)
     poi_color = (1.0, 0.2, 0.8, 1.0)
     orbit_color = (0.8, 0.4, 1.0, 0.8)
+    helix_color = (0.4, 1.0, 0.6, 0.85)
     transition_color = (0.5, 0.5, 1.0, 0.5)
     
     # Cache for orbit data to avoid recreating objects
@@ -141,6 +142,67 @@ def _linear_path_draw_handler(ctx):
                 
                 # Draw radius line
                 ctx.draw_line_3d(poi, orbit_data['start'], (poi_color[0], poi_color[1], poi_color[2], 0.3), 1.0)
+        
+        elif seg_type == 'helix':
+            centre = seg_data.get('centre')
+            if centre:
+                # Draw centre axis spine (from start_height to end_height)
+                axis = seg_data.get('orbit_axis', 'z')
+                sh = seg_data.get('start_height', 0.0)
+                eh = seg_data.get('end_height', 10.0)
+                cx, cy, cz = centre
+                if axis == 'z':
+                    axis_start = (cx, cy, cz + sh)
+                    axis_end   = (cx, cy, cz + eh)
+                elif axis == 'y':
+                    axis_start = (cx, cy + sh, cz)
+                    axis_end   = (cx, cy + eh, cz)
+                else:
+                    axis_start = (cx + sh, cy, cz)
+                    axis_end   = (cx + eh, cy, cz)
+
+                ctx.draw_line_3d(axis_start, axis_end,
+                                 (helix_color[0], helix_color[1], helix_color[2], 0.35), 1.5)
+                ctx.draw_point_3d(centre, (0.4, 1.0, 0.6, 0.9), 18.0)
+                screen_c = ctx.world_to_screen(centre)
+                if screen_c:
+                    ctx.draw_text_2d((screen_c[0] + 10, screen_c[1] - 8), f"H{i+1}", helix_color)
+
+                # Build helix sample points
+                num_pts = max(48, int(abs(seg_data.get('loops', 2.0)) * 24))
+                import math as _hmath
+                clockwise = seg_data.get('clockwise', True)
+                angle_sign = -1.0 if clockwise else 1.0
+                sr = seg_data.get('start_radius', 8.0)
+                er = seg_data.get('end_radius', 8.0)
+                loops = seg_data.get('loops', 2.0)
+                helix_pts = []
+                for k in range(num_pts + 1):
+                    t = k / num_pts
+                    r = sr + (er - sr) * t
+                    h = sh + (eh - sh) * t
+                    ang = angle_sign * 2.0 * _hmath.pi * loops * t
+                    if axis == 'z':
+                        helix_pts.append((cx + r * _hmath.sin(ang),
+                                          cy + r * _hmath.cos(ang),
+                                          cz + h))
+                    elif axis == 'y':
+                        helix_pts.append((cx + r * _hmath.sin(ang),
+                                          cy + h,
+                                          cz + r * _hmath.cos(ang)))
+                    else:
+                        helix_pts.append((cx + h,
+                                          cy + r * _hmath.sin(ang),
+                                          cz + r * _hmath.cos(ang)))
+
+                arc_color = (1.0, 1.0, 0.0, 0.5 + highlight_alpha * 0.5) if is_highlighted else helix_color
+                arc_width = 2.5 + (3.0 * highlight_alpha) if is_highlighted else 2.5
+                for k in range(len(helix_pts) - 1):
+                    ctx.draw_line_3d(helix_pts[k], helix_pts[k + 1], arc_color, arc_width)
+
+                # Start / end markers
+                ctx.draw_point_3d(helix_pts[0], start_color, 16.0)
+                ctx.draw_point_3d(helix_pts[-1], end_color, 16.0)
         else:
             start = seg_data.get('start')
             end = seg_data.get('end')
@@ -186,6 +248,27 @@ def _linear_path_draw_handler(ctx):
             if seg_type == 'orbit':
                 orbit_data = get_orbit_data(i, seg_data)
                 curr_end = orbit_data['end'] if orbit_data else None
+            elif seg_type == 'helix':
+                centre = seg_data.get('centre')
+                if centre:
+                    import math as _hm2
+                    sr = seg_data.get('start_radius', 8.0)
+                    er = seg_data.get('end_radius', 8.0)
+                    sh = seg_data.get('start_height', 0.0)
+                    eh = seg_data.get('end_height', 10.0)
+                    loops = seg_data.get('loops', 2.0)
+                    clockwise = seg_data.get('clockwise', True)
+                    axis = seg_data.get('orbit_axis', 'z')
+                    ang = (-1.0 if clockwise else 1.0) * 2.0 * _hm2.pi * loops
+                    cx, cy, cz = centre
+                    if axis == 'z':
+                        curr_end = (cx + er * _hm2.sin(ang), cy + er * _hm2.cos(ang), cz + eh)
+                    elif axis == 'y':
+                        curr_end = (cx + er * _hm2.sin(ang), cy + eh, cz + er * _hm2.cos(ang))
+                    else:
+                        curr_end = (cx + eh, cy + er * _hm2.sin(ang), cz + er * _hm2.cos(ang))
+                else:
+                    curr_end = None
             else:
                 curr_end = seg_data.get('end')
             
@@ -193,6 +276,16 @@ def _linear_path_draw_handler(ctx):
             if next_seg.get('type') == 'orbit':
                 next_orbit_data = get_orbit_data(i + 1, next_seg)
                 next_start = next_orbit_data['start'] if next_orbit_data else None
+            elif next_seg.get('type') == 'helix':
+                next_centre = next_seg.get('centre')
+                if next_centre:
+                    next_start = (
+                        next_centre[0] + next_seg.get('start_radius', 8.0) * _hm2.sin(0),
+                        next_centre[1] + next_seg.get('start_radius', 8.0) * _hm2.cos(0),
+                        next_centre[2] + next_seg.get('start_height', 0.0)
+                    )
+                else:
+                    next_start = None
             else:
                 next_start = next_seg.get('start')
             
@@ -228,6 +321,20 @@ def _linear_path_draw_handler(ctx):
                 arc_degrees=seg_data.get('arc_degrees', 360.0),
                 duration=seg_data.get('duration', 30.0),
                 invert_direction=seg_data.get('invert_direction', False)
+            ))
+        elif seg_type == 'helix' and seg_data.get('centre'):
+            path.segments.append(HelixSegment(
+                centre=seg_data['centre'],
+                start_radius=seg_data.get('start_radius', 8.0),
+                end_radius=seg_data.get('end_radius', 8.0),
+                start_height=seg_data.get('start_height', 0.0),
+                end_height=seg_data.get('end_height', 10.0),
+                loops=seg_data.get('loops', 2.0),
+                duration=seg_data.get('duration', 30.0),
+                orbit_axis=seg_data.get('orbit_axis', 'z'),
+                clockwise=seg_data.get('clockwise', True),
+                follow_y=seg_data.get('follow_y', False),
+                y_offset=seg_data.get('y_offset', 0.0),
             ))
         elif seg_data.get('start') and seg_data.get('end'):
             path.segments.append(LineSegment(
@@ -298,6 +405,12 @@ class LinearPathPanel(Panel):
         ("z", "Z-Axis"),
         ("y", "Y-Axis"),
         ("x", "X-Axis"),
+    ]
+
+    HELIX_AXIS_ITEMS = [
+        ("z", "Z-Axis (up)"),
+        ("y", "Y-Axis (up)"),
+        ("x", "X-Axis (up)"),
     ]
     
     # Walking speed in meters/second (average ~1.4 m/s)
@@ -375,7 +488,11 @@ class LinearPathPanel(Panel):
                             next_seg['start'] = _pending_point
                             
                 elif point_type == "poi":
-                    current_seg['poi'] = _pending_point
+                    # Helix segments store their centre under 'centre' key
+                    if current_seg.get('type') == 'helix':
+                        current_seg['centre'] = _pending_point
+                    else:
+                        current_seg['poi'] = _pending_point
                 
                 self._status_msg = f"Point set: ({_pending_point[0]:.2f}, {_pending_point[1]:.2f}, {_pending_point[2]:.2f})"
                 self._status_is_error = False
@@ -419,7 +536,7 @@ class LinearPathPanel(Panel):
         """Add a new segment.
         
         Args:
-            segment_type: "linear" or "orbit"
+            segment_type: "linear", "orbit", or "helix"
         """
         if segment_type == "orbit":
             new_segment = {
@@ -432,6 +549,21 @@ class LinearPathPanel(Panel):
                 'arc_degrees': 360.0,
                 'duration': 30.0,
                 'invert_direction': False,
+            }
+        elif segment_type == "helix":
+            new_segment = {
+                'type': 'helix',
+                'centre': None,
+                'start_radius': 8.0,
+                'end_radius': 8.0,
+                'start_height': 0.0,
+                'end_height': 10.0,
+                'loops': 2.0,
+                'duration': 30.0,
+                'orbit_axis': 'z',
+                'clockwise': True,
+                'follow_y': False,
+                'y_offset': 0.0,
             }
         else:
             new_segment = {
@@ -456,6 +588,18 @@ class LinearPathPanel(Panel):
                         invert_direction=prev_seg.get('invert_direction', False)
                     )
                     new_segment['start'] = orbit.get_end_point()
+                elif prev_seg.get('type') == 'helix' and prev_seg.get('centre'):
+                    helix = HelixSegment(
+                        centre=prev_seg['centre'],
+                        start_radius=prev_seg.get('start_radius', 8.0),
+                        end_radius=prev_seg.get('end_radius', 8.0),
+                        start_height=prev_seg.get('start_height', 0.0),
+                        end_height=prev_seg.get('end_height', 10.0),
+                        loops=prev_seg.get('loops', 2.0),
+                        orbit_axis=prev_seg.get('orbit_axis', 'z'),
+                        clockwise=prev_seg.get('clockwise', True),
+                    )
+                    new_segment['start'] = helix.get_end_point()
                 elif prev_seg.get('end'):
                     new_segment['start'] = prev_seg['end']
         
@@ -487,6 +631,18 @@ class LinearPathPanel(Panel):
                     invert_direction=prev_seg.get('invert_direction', False)
                 )
                 connect_point = orbit.get_end_point()
+            elif prev_seg.get('type') == 'helix' and prev_seg.get('centre'):
+                helix = HelixSegment(
+                    centre=prev_seg['centre'],
+                    start_radius=prev_seg.get('start_radius', 8.0),
+                    end_radius=prev_seg.get('end_radius', 8.0),
+                    start_height=prev_seg.get('start_height', 0.0),
+                    end_height=prev_seg.get('end_height', 10.0),
+                    loops=prev_seg.get('loops', 2.0),
+                    orbit_axis=prev_seg.get('orbit_axis', 'z'),
+                    clockwise=prev_seg.get('clockwise', True),
+                )
+                connect_point = helix.get_end_point()
             else:
                 connect_point = prev_seg.get('end')
             
@@ -824,6 +980,25 @@ class LinearPathPanel(Panel):
                         invert_direction=seg_data.get('invert_direction', False)
                     )
                     path.segments.append(segment)
+            
+            elif seg_type == 'helix':
+                # Helix segment - needs centre
+                if seg_data.get('centre'):
+                    segment = HelixSegment(
+                        centre=seg_data['centre'],
+                        start_radius=seg_data.get('start_radius', 8.0),
+                        end_radius=seg_data.get('end_radius', 8.0),
+                        start_height=seg_data.get('start_height', 0.0),
+                        end_height=seg_data.get('end_height', 10.0),
+                        loops=seg_data.get('loops', 2.0),
+                        duration=seg_data.get('duration', 30.0),
+                        orbit_axis=seg_data.get('orbit_axis', 'z'),
+                        clockwise=seg_data.get('clockwise', True),
+                        follow_y=seg_data.get('follow_y', False),
+                        y_offset=seg_data.get('y_offset', 0.0),
+                    )
+                    path.segments.append(segment)
+            
             else:
                 # Linear segment - needs start and end
                 if seg_data.get('start') and seg_data.get('end'):
@@ -952,6 +1127,9 @@ class LinearPathPanel(Panel):
                 if seg_type == 'orbit':
                     is_complete = seg_data.get('poi') is not None
                     type_label = "Orbit"
+                elif seg_type == 'helix':
+                    is_complete = seg_data.get('centre') is not None
+                    type_label = "Helix"
                 else:
                     is_complete = seg_data.get('start') is not None and seg_data.get('end') is not None
                     type_label = "Linear"
@@ -1070,7 +1248,147 @@ class LinearPathPanel(Panel):
                         if changed:
                             seg_data['invert_direction'] = new_invert
                             self._update_draw_state()
-                        
+
+                    elif seg_type == 'helix':
+                        # === HELIX SEGMENT UI ===
+
+                        # Centre point (required — picked in viewport)
+                        layout.label("Centre:")
+                        layout.same_line()
+                        layout.text_colored(
+                            self._format_point(seg_data.get('centre')),
+                            (0.4, 1.0, 0.6, 1.0) if seg_data.get('centre') else theme.palette.text_dim
+                        )
+                        layout.same_line()
+                        picking_centre = self._picking and self._pick_target == (i, "poi")
+                        if picking_centre:
+                            if layout.button_styled(f"[Cancel]##{i}_hctr_cancel", "error", (70 * scale, 0)):
+                                self._cancel_picking()
+                        else:
+                            if layout.button(f"Pick##{i}_hctr", (50 * scale, 0)):
+                                self._start_picking(i, "poi")  # poi type → routed to 'centre' in _process_pending_point
+                        if layout.is_item_hovered():
+                            layout.set_tooltip("Click a point in the viewport to set the helix centre column")
+
+                        # Orbit axis
+                        layout.label("Up Axis:")
+                        helix_axis_labels = [item[1] for item in self.HELIX_AXIS_ITEMS]
+                        current_haxis_idx = 0
+                        for idx, item in enumerate(self.HELIX_AXIS_ITEMS):
+                            if item[0] == seg_data.get('orbit_axis', 'z'):
+                                current_haxis_idx = idx
+                                break
+                        layout.push_item_width(130 * scale)
+                        changed, new_haxis_idx = layout.combo(f"##helix_axis_{i}", current_haxis_idx, helix_axis_labels)
+                        if changed:
+                            seg_data['orbit_axis'] = self.HELIX_AXIS_ITEMS[new_haxis_idx][0]
+                            self._update_draw_state()
+                        layout.pop_item_width()
+
+                        # Start / end radius
+                        layout.label("Start Radius:")
+                        layout.push_item_width(-1)
+                        changed, v = layout.drag_float(f"##hx_sr_{i}", seg_data.get('start_radius', 8.0), 0.1, 0.1, 500.0)
+                        if changed:
+                            seg_data['start_radius'] = max(0.1, v)
+                            self._update_draw_state()
+                        layout.pop_item_width()
+                        if layout.is_item_hovered():
+                            layout.set_tooltip("Orbit radius at the start of the helix. Drag or Ctrl+Click to type.")
+
+                        layout.label("End Radius:")
+                        layout.push_item_width(-1)
+                        changed, v = layout.drag_float(f"##hx_er_{i}", seg_data.get('end_radius', 8.0), 0.1, 0.1, 500.0)
+                        if changed:
+                            seg_data['end_radius'] = max(0.1, v)
+                            self._update_draw_state()
+                        layout.pop_item_width()
+                        if layout.is_item_hovered():
+                            layout.set_tooltip("Orbit radius at the end of the helix (set different to start for a cone spiral).")
+
+                        # Start / end height
+                        layout.label("Start Height:")
+                        layout.push_item_width(-1)
+                        changed, v = layout.drag_float(f"##hx_sh_{i}", seg_data.get('start_height', 0.0), 0.1, -500.0, 500.0)
+                        if changed:
+                            seg_data['start_height'] = v
+                            self._update_draw_state()
+                        layout.pop_item_width()
+                        if layout.is_item_hovered():
+                            layout.set_tooltip("Height offset along the up-axis at the start of the helix.")
+
+                        layout.label("End Height:")
+                        layout.push_item_width(-1)
+                        changed, v = layout.drag_float(f"##hx_eh_{i}", seg_data.get('end_height', 10.0), 0.1, -500.0, 500.0)
+                        if changed:
+                            seg_data['end_height'] = v
+                            self._update_draw_state()
+                        layout.pop_item_width()
+                        if layout.is_item_hovered():
+                            layout.set_tooltip("Height offset along the up-axis at the end of the helix.")
+
+                        # Loops
+                        layout.label("Loops:")
+                        layout.push_item_width(-1)
+                        changed, v = layout.slider_float(f"##hx_loops_{i}", seg_data.get('loops', 2.0), 0.25, 20.0)
+                        if changed:
+                            seg_data['loops'] = max(0.25, v)
+                            self._update_draw_state()
+                        layout.pop_item_width()
+                        if layout.is_item_hovered():
+                            layout.set_tooltip("Number of complete rotations from start to end.")
+
+                        # Duration
+                        layout.label("Duration (s):")
+                        layout.push_item_width(-1)
+                        changed, v = layout.slider_float(f"##hx_dur_{i}", seg_data.get('duration', 30.0), 1.0, 300.0)
+                        if changed:
+                            seg_data['duration'] = max(1.0, v)
+                            self._update_draw_state()
+                        layout.pop_item_width()
+
+                        # Clockwise direction
+                        changed, v = layout.checkbox(f"Clockwise##{i}_hx_cw", seg_data.get('clockwise', True))
+                        if changed:
+                            seg_data['clockwise'] = v
+                            self._update_draw_state()
+                        if layout.is_item_hovered():
+                            layout.set_tooltip("Direction of rotation viewed from the positive up-axis.")
+
+                        # Follow-Y target
+                        layout.spacing()
+                        changed, v = layout.checkbox(f"Target follows camera height##{i}_hx_fy", seg_data.get('follow_y', False))
+                        if changed:
+                            seg_data['follow_y'] = v
+                            self._update_draw_state()
+                        if layout.is_item_hovered():
+                            layout.set_tooltip(
+                                "When on, the look-target height tracks the camera's current height "
+                                "as it rises/descends, rather than staying fixed at the mid-point."
+                            )
+
+                        # Y offset — only meaningful when follow_y is on
+                        follow_y_on = seg_data.get('follow_y', False)
+                        layout.label("Height Offset:")
+                        layout.same_line()
+                        layout.push_item_width(120 * scale)
+                        if follow_y_on:
+                            changed, v = layout.drag_float(
+                                f"##hx_yoff_{i}", seg_data.get('y_offset', 0.0), 0.05, -100.0, 100.0, "%.2f"
+                            )
+                            if changed:
+                                seg_data['y_offset'] = v
+                                self._update_draw_state()
+                        else:
+                            # Show greyed-out placeholder when follow_y is off
+                            layout.text_colored("(enable above)", theme.palette.text_dim)
+                        layout.pop_item_width()
+                        if layout.is_item_hovered():
+                            layout.set_tooltip(
+                                "Added to the look-target height when 'Target follows camera height' is on.\n"
+                                "Positive = look above camera level, negative = look below."
+                            )
+                    
                     else:
                         # === LINEAR SEGMENT UI ===
                         
@@ -1158,6 +1476,9 @@ class LinearPathPanel(Panel):
             layout.same_line()
             if layout.button("+ Orbit##add_orbit", (100 * scale, 28 * scale)):
                 self._add_segment("orbit")
+            layout.same_line()
+            if layout.button("+ Helix##add_helix", (100 * scale, 28 * scale)):
+                self._add_segment("helix")
         
         layout.separator()
         

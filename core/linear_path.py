@@ -184,8 +184,108 @@ class OrbitSegment:
         return (0.0, 0.0, 1.0)
 
 
+@dataclass
+class HelixSegment:
+    """A helical (spiral) camera path around a centre point.
+
+    The helix rises (or descends) along the orbit axis while orbiting, so
+    the camera sweeps a full 3-D corkscrew path.  The camera always looks
+    inward at the vertical centreline at the camera's current height, with
+    an optional offset so you can tilt the gaze slightly above or below.
+
+    Attributes:
+        centre:          XYZ centre of the helix column
+        start_radius:    Orbit radius at the beginning of the path
+        end_radius:      Orbit radius at the end of the path
+        start_height:    Height offset (along orbit_axis) at the start
+        end_height:      Height offset (along orbit_axis) at the end
+        loops:           Number of full rotations over the whole path
+        duration:        Time in seconds for the full helix path
+        orbit_axis:      Axis that defines "up" for the helix ('z','y','x')
+        clockwise:       True = clockwise when viewed from +axis
+        follow_y:        If True the look-target height tracks the camera
+        y_offset:        Added to the look-target height when follow_y=True
+    """
+    centre: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    start_radius: float = 8.0
+    end_radius: float = 8.0
+    start_height: float = 0.0
+    end_height: float = 10.0
+    loops: float = 2.0
+    duration: float = 30.0
+    orbit_axis: str = "z"
+    clockwise: bool = True
+    follow_y: bool = False
+    y_offset: float = 0.0
+    segment_type: str = "helix"
+
+    def _angle_sign(self) -> float:
+        return -1.0 if self.clockwise else 1.0
+
+    def _compute_position(self, t: float) -> Tuple[float, float, float]:
+        t = max(0.0, min(1.0, t))
+        r = self.start_radius + (self.end_radius - self.start_radius) * t
+        h = self.start_height + (self.end_height - self.start_height) * t
+        angle = self._angle_sign() * 2.0 * math.pi * self.loops * t
+        cx, cy, cz = self.centre
+        if self.orbit_axis == "z":
+            return (cx + r * math.sin(angle), cy + r * math.cos(angle), cz + h)
+        elif self.orbit_axis == "y":
+            return (cx + r * math.sin(angle), cy + h, cz + r * math.cos(angle))
+        else:  # x
+            return (cx + h, cy + r * math.sin(angle), cz + r * math.cos(angle))
+
+    def _look_target(self, t: float) -> Tuple[float, float, float]:
+        t = max(0.0, min(1.0, t))
+        h = self.start_height + (self.end_height - self.start_height) * t
+        cx, cy, cz = self.centre
+        if self.follow_y:
+            tgt_h = h + self.y_offset
+        else:
+            tgt_h = (self.start_height + self.end_height) * 0.5
+
+        if self.orbit_axis == "z":
+            return (cx, cy, cz + tgt_h)
+        elif self.orbit_axis == "y":
+            return (cx, cy + tgt_h, cz)
+        else:
+            return (cx + tgt_h, cy, cz)
+
+    def get_length(self) -> float:
+        samples = 64
+        total = 0.0
+        prev = np.array(self._compute_position(0.0))
+        for i in range(1, samples + 1):
+            curr = np.array(self._compute_position(i / samples))
+            total += float(np.linalg.norm(curr - prev))
+            prev = curr
+        return total
+
+    def get_duration(self, speed: float = None) -> float:
+        return self.duration
+
+    def get_start_point(self) -> Tuple[float, float, float]:
+        return self._compute_position(0.0)
+
+    def get_end_point(self) -> Tuple[float, float, float]:
+        return self._compute_position(1.0)
+
+    def get_position_at(self, t: float) -> Tuple[float, float, float]:
+        return self._compute_position(t)
+
+    def get_look_at(self, t: float = 0.5) -> Tuple[float, float, float]:
+        return self._look_target(t)
+
+    def get_up_vector(self) -> Tuple[float, float, float]:
+        if self.orbit_axis == "z":
+            return (0.0, 0.0, 1.0)
+        elif self.orbit_axis == "y":
+            return (0.0, 1.0, 0.0)
+        return (1.0, 0.0, 0.0)
+
+
 # Union type for segments
-Segment = LineSegment | OrbitSegment
+Segment = LineSegment | OrbitSegment | HelixSegment
 
 
 def _catmull_rom(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, t: float) -> np.ndarray:
@@ -483,6 +583,10 @@ class LinearPath:
         # Orbit segments handle their own position calculation
         if isinstance(segment, OrbitSegment):
             return segment.get_position_at(local_t)
+
+        # Helix segments handle their own position calculation
+        if isinstance(segment, HelixSegment):
+            return segment.get_position_at(local_t)
         
         # Linear segment
         p1 = np.array(segment.get_start_point())
@@ -543,6 +647,8 @@ class LinearPath:
         # Orbit segments always look at POI
         if isinstance(segment, OrbitSegment):
             direction = np.array(segment.poi) - pos
+        elif isinstance(segment, HelixSegment):
+            direction = np.array(segment.get_look_at(local_t)) - pos
         elif hasattr(segment, 'look_mode') and segment.look_mode == "poi" and segment.poi is not None:
             # Linear segment with POI look mode
             direction = np.array(segment.poi) - pos
@@ -596,6 +702,10 @@ class LinearPath:
         # Orbit segments always look at POI
         if isinstance(segment, OrbitSegment):
             return segment.poi
+
+        # Helix segments compute their own look target
+        if isinstance(segment, HelixSegment):
+            return segment.get_look_at(local_t)
         
         # Check previous/next segment types
         prev_is_linear = self._is_linear_segment(idx - 1)
@@ -676,6 +786,10 @@ class LinearPath:
         
         # Orbit segments use their own up vector
         if isinstance(segment, OrbitSegment):
+            return segment.get_up_vector()
+
+        # Helix segments use their own up vector
+        if isinstance(segment, HelixSegment):
             return segment.get_up_vector()
         
         # Linear segments compute up from forward direction
